@@ -35,13 +35,22 @@ The first step is understanding the problem: how volatile are the FX rates? What
 
 ![FX Daily](./assets/plot_historic_daily_fx.png)
 Daily FX since April 2025. 
-Volatility
+Volatility is within the bandwidth of 0.4%
 
 ![FX Weekly](./assets/plot_historic_fx_weeklywhisker.png)
 
 **Expert Projections**
 
-k
+Here are the various expert opinions:
+
+```python
+# max, min, expected
+
+dads_friend = (3.30, 3.35, 3.33)
+hsbc_rm = (3.25, 3.40, 3.35)
+bloomberg_futures = (3.33, 3.34, 3.335)
+
+```
 
 ### $r$: Expected Returns from Investment Products
 

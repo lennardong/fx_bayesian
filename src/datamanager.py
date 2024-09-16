@@ -14,7 +14,7 @@ from src.sharedutils import find_project_root
 #########################
 
 
-class FXDataManager:
+class AlphaVantageDataManager:
     """
     Manages foreign exchange (FX) data for a given currency pair.
     Handles data fetching and storage and various transformations.
@@ -277,5 +277,5 @@ class FXDataManager:
 
 # Usage
 if __name__ == "__main__":
-    fx_manager = FXDataManager("SGD", "MYR")
+    fx_manager = AlphaVantageDataManager("SGD", "MYR")
     df = fx_manager.df
