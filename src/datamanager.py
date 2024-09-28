@@ -1,15 +1,11 @@
 import configparser
 import os
 import sqlite3
-from contextlib import contextmanager
-from datetime import date
-from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-import pandas as pd
-import requests
+import seaborn as sns
 
-from src.sharedutils import find_project_root
+from src import *
+from src._singletons import *
 
 #########################
 
@@ -30,7 +26,6 @@ class AlphaVantageDataManager:
     def __init__(self, from_symbol: str = "SGD", to_symbol: str = "SGD"):
         self.from_symbol = from_symbol
         self.to_symbol = to_symbol
-        self.config = self._load_config()
         try:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         except Exception as e:
@@ -39,7 +34,7 @@ class AlphaVantageDataManager:
 
     @property
     def db_path(self):
-        relative_path = self.config.get("DATABASE", "path")
+        relative_path = ProjectVar.DB_PATH
         project_root = find_project_root()
         return str(project_root / relative_path)
 
@@ -48,25 +43,11 @@ class AlphaVantageDataManager:
         """
         Get the FX data as a DataFrame.
         """
-        self._poll_source_and_refresh_db()
-        df = self._pull_df_from_db()
-        return df
+        return self._pull_df_from_db()
 
     ##############################
 
     # PRIVATE METHODS
-
-    def _load_config(self) -> configparser.ConfigParser:
-        """Load the configuration from the config file.
-
-        Returns:
-            Loaded configuration.
-        """
-        config = configparser.ConfigParser()
-        project_root = find_project_root()
-        config.read(project_root / "config.ini")
-        print("Loaded config sections:", config.sections())
-        return config
 
     @contextmanager
     def _get_connection(self):
@@ -81,92 +62,88 @@ class AlphaVantageDataManager:
         finally:
             conn.close()
 
-    def _poll_source_and_refresh_db(self) -> None:
+    def query_endpoint(self) -> None:
         """Refresh the database by fetching and inserting FX data."""
+        # TODO fix refresh to ACTUALLY WORK. currently retrieves data from the API regardless if its already there
 
         # HELPER FUNCTIONS
 
         def create_fx_table() -> None:
             """Create the FX data table if it doesn't exist."""
+            TABLE_SCHEMA = f"""
+                CREATE TABLE IF NOT EXISTS {ProjectVar.TABLE_NAME} (
+                    {ColName.DATE} TEXT,
+                    {ColName.SYMBOL_FROM} TEXT,
+                    {ColName.SYMBOL_TO} TEXT,
+                    {ColName.OPEN} FLOAT,
+                    {ColName.HIGH} FLOAT,
+                    {ColName.LOW} FLOAT,
+                    {ColName.CLOSE} FLOAT,
+                    PRIMARY KEY ({ColName.DATE}, {ColName.SYMBOL_FROM}, {ColName.SYMBOL_TO})
+                )
+            """
             with self._get_connection() as conn:
-                # Check if the table exists and has the correct structure
-                cursor = conn.execute("SELECT * FROM fx_data LIMIT 1")
-
-                columns = [description[0] for description in cursor.description]
-                if set(columns) != {
-                    "date",
-                    "from_symbol",
-                    "to_symbol",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                }:
-                    # If the table doesn't have the correct structure, drop it and recreate
-                    conn.execute("DROP TABLE IF EXISTS fx_data")
-                    conn.execute(
-                        """
-                        CREATE TABLE fx_data (
-                            date TEXT,
-                            from_symbol TEXT,
-                            to_symbol TEXT,
-                            open REAL,
-                            high REAL,
-                            low REAL,
-                            close REAL,
-                            PRIMARY KEY (date, from_symbol, to_symbol)
-                        )
-                        """
-                    )
+                conn.execute(TABLE_SCHEMA)
+                print(f"Table {ProjectVar.TABLE_NAME} created or already exists.")
 
         def is_today_pulled() -> bool:
-            """Check if data for today already exists in the database."""
-            today = date.today().isoformat()
+            today = datetime.now().date().strftime("%Y-%m-%d")
+            print(f"Debug: Checking for data on {today}")
             with self._get_connection() as conn:
-                # Execute a SQL query to check if today's data exists
                 cursor = conn.execute(
-                    """
-                    SELECT 1 FROM fx_data 
-                    WHERE date = ? 
-                    AND from_symbol = ? 
-                    AND to_symbol = ?
+                    f"""
+                    SELECT 1 FROM {ProjectVar.TABLE_NAME}
+                    WHERE {ColName.DATE} = ? 
+                    AND {ColName.SYMBOL_FROM} = ? 
+                    AND {ColName.SYMBOL_TO}= ?
                     """,
                     (today, self.from_symbol, self.to_symbol),
                 )
-
-                return cursor.fetchone() is not None
+                result = cursor.fetchone() is not None
+                print(f"Debug: Data for {today} exists: {result}")
+                return result
 
         def fetch_fx_data() -> Dict[str, Any]:
-            """Fetch FX data from the API.
+            """Fetch FX data from the API and convert dates to datetime objects.
 
             Returns:
-                JSON response containing FX data.
+                Dict containing FX data with datetime objects as keys.
+
+            # TODO: amend this to later use Pydantic for dtype vbalidation before passing to DB
             """
-            # Prepare API request parameters
             parameters = {
                 "function": "FX_DAILY",
                 "from_symbol": self.from_symbol,
                 "to_symbol": self.to_symbol,
                 "datatype": "json",
-                "apikey": self.config["API"]["key"],
+                "apikey": ProjectVar.KEY,
             }
-            # Make API request
-            response = requests.get(self.config["API"]["url"], params=parameters)
+            response = requests.get(ProjectVar.API_URL, params=parameters)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+
+            # # Convert string dates to datetime objects
+            # time_series = data["Time Series FX (Daily)"]
+            # converted_time_series = {
+            #     datetime.strptime(date, "%Y-%m-%d"): values
+            #     for date, values in time_series.items()
+            # }
+            # data["Time Series FX (Daily)"] = converted_time_series
+
+            return data
 
         def insert_fx_data(time_series: Dict[str, Dict[str, str]]) -> None:
             """Insert FX data into the database."""
             with self._get_connection() as conn:
                 cursor = conn.executemany(
-                    """
-                    INSERT OR REPLACE INTO fx_data
-                    (date, from_symbol, to_symbol, open, high, low, close)
+                    f"""
+                    INSERT OR REPLACE INTO {ProjectVar.TABLE_NAME}
+                    ({ColName.DATE}, {ColName.SYMBOL_FROM}, {ColName.SYMBOL_TO}, {ColName.OPEN}, {ColName.HIGH}, {ColName.LOW}, {ColName.CLOSE})
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
-                            date,
+                            date,  # Convert datetime to string
                             self.from_symbol,
                             self.to_symbol,
                             values["1. open"],
@@ -210,8 +187,8 @@ class AlphaVantageDataManager:
             """Retrieve FX data from the database as a DataFrame."""
             with self._get_connection() as conn:
                 return pd.read_sql_query(
-                    """
-                    SELECT * FROM fx_data
+                    f"""
+                    SELECT * FROM {ProjectVar.TABLE_NAME}
                     WHERE from_symbol = ? AND to_symbol = ?
                     """,
                     conn,
@@ -220,8 +197,8 @@ class AlphaVantageDataManager:
 
         def _process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             # Convert date to datetime and set as index
-            df["date"] = pd.to_datetime(df["date"])
-            df.set_index("date", inplace=True)
+            df[ColName.DATE] = pd.to_datetime(df[ColName.DATE])
+            df.set_index(ColName.DATE, inplace=True)
             df.sort_index(ascending=False, inplace=True)
 
             return df
@@ -240,39 +217,6 @@ class AlphaVantageDataManager:
         return processed_df
 
     ###############################
-
-    # PUBLIC METHODS
-
-    def compute_volatility(self, window: int = 7):
-        """Compute the volatility of the FX data.
-        Args:
-            window: The rolling window size for volatility calculation.
-        """
-        # Fetch the FX data
-        df = self.df
-        # Calculate log returns and volatility
-        df["log_return"] = np.log(df["close"] / df["close"].shift(1))
-        df["volatility"] = df["log_return"].rolling(window=window).std()
-        return df
-
-    def to_weekly(self):
-        df = self.df.resample("W").agg(
-            {
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            }
-        )
-        df.reset_index(inplace=True)
-        return df
-
-    def set_currency_pair(self, from_symbol, to_symbol):
-        """Set the currency pair for the FX data manager and  refreshes the DB with  the latest data"""
-        self.from_symbol = from_symbol
-        self.to_symbol = to_symbol
-        self._poll_source_and_refresh_db()
 
 
 # Usage
