@@ -34,10 +34,10 @@ def compute_relative_strength_index(
     df: pd.DataFrame, col: ColName, window: int = 14
 ) -> Dict[datetime, float]:
     """
-    Compute the Relative Strength Index (RSI) for a given DataFrame column.
+    Compute the Relative Strngth Index (RSI) for a given DataFrame column.
 
     The RSI is a momentum indicator that measures the magnitude of recent price
-    changes to evaluate overbought or oversold conditions in the price of a stock
+    changes to "evaluate"overbought or oversold conditions in the price of a stock
     or other asset.
 
     Calculation:
