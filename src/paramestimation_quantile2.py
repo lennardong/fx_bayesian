@@ -215,7 +215,7 @@ https://claude.ai/chat/aee5df6a-d673-4c3f-8e2a-84c4d931d278
 
 import numpy as np
 from scipy import stats
-from scipy.optimize import minimize, curve_fit
+from scipy.optimize import minimize, curve_fit, brentq
 from dataclasses import dataclass
 import warnings
 import matplotlib.pyplot as plt
@@ -270,8 +270,8 @@ class ExpertOpinion:
             self.expert.q75,
             self.expert.q95 if self.expert.q95 is not None else self.expert.q75,
         ]
-        # self.lower = min(all_quantiles) - 0.05
-        # self.upper = max(all_quantiles) + 0.05
+        # self.lower = min(all_quantiles) - 0.1
+        # self.upper = max(all_quantiles) + 0.1
         # self.range = self.upper - self.lower
         self._calculate_bounds()
 
@@ -299,37 +299,6 @@ class ExpertOpinion:
         # Calculate bounds
         self.lower = slope_left * 0 + intercept_left
         self.upper = slope_right * 1 + intercept_right
-        self.range = self.upper - self.lower
-
-    def _calculate_bounds_linear3(self):
-        # Left side (Q05 to median)
-        x_left = np.array([0.05, 0.25, 0.5])
-        y_left = np.array([self.expert.q05, self.expert.q25, self.expert.median])
-        slope_left, intercept_left = np.polyfit(x_left, y_left, 1)
-
-        # Right side (median to Q95)
-        x_right = np.array([0.5, 0.75, 0.95])
-        y_right = np.array([self.expert.median, self.expert.q75, self.expert.q95])
-        slope_right, intercept_right = np.polyfit(x_right, y_right, 1)
-
-        # Extrapolate to get lower and upper bounds
-        self.lower = slope_left * 0 + intercept_left
-        self.upper = slope_right * 1 + intercept_right
-        self.range = self.upper - self.lower
-
-    def _calculate_bounds_logreg(self):
-        x_left = [0.05, 0.25, 0.5]
-        y_left = [self.expert.q05, self.expert.q25, self.expert.median]
-        params_left, _ = curve_fit(logistic_function, x_left, y_left, p0=[1, 1, 0.25])
-
-        x_right = [0.5, 0.75, 0.95]
-        y_right = [self.expert.median, self.expert.q75, self.expert.q95]
-        params_right, _ = curve_fit(
-            logistic_function, x_right, y_right, p0=[1, 1, 0.75]
-        )
-
-        self.lower = logistic_function(0, *params_left)
-        self.right = logistic_function(1, *params_right)
         self.range = self.upper - self.lower
 
     def _estimate_initial_params(self):
@@ -381,7 +350,6 @@ class ExpertOpinion:
         q75_err = (stats.beta.ppf(0.75, alpha, beta) - self.norm_q75) ** 2
         median_err = (stats.beta.ppf(0.5, alpha, beta) - self.norm_median) ** 4
 
-        # Weight median more heavily based on confidence
         confidence_weight = 1 + self.expert.confidence
 
         # Basic error
@@ -528,8 +496,8 @@ class ExpertOpinion:
             # Plot vertical lines for quantiles
             for q, val, label in quantiles:
                 y_height = self.pdf(val)
-                ax.vlines(val, 0, y_height, colors="r", linestyles="--", alpha=0.5)
-                ax.plot(val, y_height, "ro")
+                ax.vlines(val, 0, y_height, colors="gray", linestyles=":", alpha=0.5)
+                ax.plot(val, y_height, "x", color="gray")
                 # Add text annotation slightly above the point
                 ax.annotate(
                     f"{label}\n({val:.2f})",
@@ -538,6 +506,22 @@ class ExpertOpinion:
                     textcoords="offset points",
                     ha="center",
                     va="bottom",
+                    color="gray",
+                )
+                # Plot distribution-derived quantiles
+            dist_quantiles = [self.quantile(q) for q, _, _ in quantiles]
+            for q, val in zip([q for q, _, _ in quantiles], dist_quantiles):
+                y_height = self.pdf(val)
+                ax.vlines(val, 0, y_height, colors="red", linestyles="--", alpha=1.0)
+                ax.plot(val, y_height, "o", color="red")
+                ax.annotate(
+                    f"Dist {q:.2f}\n({val:.2f})",
+                    xy=(val, y_height),
+                    xytext=(-20, 10),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    color="black",
                 )
 
         if show_confidence:
@@ -605,6 +589,22 @@ class MixtureNormalExpertOpinion:
         self.mixture_params = None
         self._calculate_bounds()
 
+    def _calculate_bounds(self):
+        # Left side (median to Q05)
+        x_left = np.array([0.5, 0.05])
+        y_left = np.array([self.expert.median, self.expert.q05])
+        slope_left, intercept_left = np.polyfit(x_left, y_left, 1)
+
+        # Right side (median to Q95)
+        x_right = np.array([0.5, 0.95])
+        y_right = np.array([self.expert.median, self.expert.q95])
+        slope_right, intercept_right = np.polyfit(x_right, y_right, 1)
+
+        # Calculate bounds
+        self.lower = slope_left * 0 + intercept_left
+        self.upper = slope_right * 1 + intercept_right
+        self.range = self.upper - self.lower
+
     def _objective_function(self, params):
         mu1, sigma1, mu2, sigma2, w = params
         mixture_cdf = lambda x: w * norm.cdf(x, mu1, sigma1) + (1 - w) * norm.cdf(
@@ -650,12 +650,111 @@ class MixtureNormalExpertOpinion:
 
     # Add methods for sampling, plotting, etc.
 
+    def plot_pdf(
+        self, num_points=1000, figsize=(12, 8), show_quantiles=True, title=None
+    ):
+        if self.mixture_params is None:
+            raise ValueError("Model must be fitted first")
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        # Generate points for PDF curve
+        x = np.linspace(self.lower, self.upper, num_points)
+        y = self.pdf(x)
+
+        # Plot main PDF
+        ax.plot(x, y, "b-", lw=2, label="Fitted Mixture Distribution")
+
+        if show_quantiles:
+            # Plot expert quantile markers
+            quantiles = [
+                (0.05, self.expert.q05, "Q05"),
+                (0.25, self.expert.q25, "Q25"),
+                (0.5, self.expert.median, "Median"),
+                (0.75, self.expert.q75, "Q75"),
+                (0.95, self.expert.q95, "Q95"),
+            ]
+
+            # Plot vertical lines for expert quantiles
+            for q, val, label in quantiles:
+                y_height = self.pdf(val)
+                ax.vlines(val, 0, y_height, colors="r", linestyles="--", alpha=0.5)
+                ax.plot(val, y_height, "ro")
+                ax.annotate(
+                    f"{label}\n({val:.2f})",
+                    xy=(val, y_height),
+                    xytext=(0, 10),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                )
+
+            # Plot distribution-derived quantiles
+            mixture_cdf = lambda x: self.mixture_params[4] * norm.cdf(
+                x, self.mixture_params[0], self.mixture_params[1]
+            ) + (1 - self.mixture_params[4]) * norm.cdf(
+                x, self.mixture_params[2], self.mixture_params[3]
+            )
+            dist_quantiles = [self.quantile(q) for q, _, _ in quantiles]
+            for q, val in zip([q for q, _, _ in quantiles], dist_quantiles):
+                y_height = self.pdf(val)
+                ax.vlines(val, 0, y_height, colors="orange", linestyles=":", alpha=0.7)
+                ax.plot(val, y_height, "o", color="orange")
+                ax.annotate(
+                    f"Dist {q:.2f}\n({val:.2f})",
+                    xy=(val, y_height),
+                    xytext=(0, 10),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    color="orange",
+                )
+
+        # Customize plot
+        if title is None:
+            title = "Expert Opinion: Mixture of Normals Distribution"
+        ax.set_title(title)
+        ax.set_xlabel("Value")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        # Add a bit of padding to the x-axis
+        x_padding = (self.upper - self.lower) * 0.05
+        ax.set_xlim(self.lower - x_padding, self.upper + x_padding)
+
+        # Ensure y-axis starts at 0
+        ax.set_ylim(bottom=0)
+
+        return fig, ax
+
+    def quantile(self, q):
+        def objective(x):
+            return (
+                self.mixture_params[4]
+                * norm.cdf(x, self.mixture_params[0], self.mixture_params[1])
+                + (1 - self.mixture_params[4])
+                * norm.cdf(x, self.mixture_params[2], self.mixture_params[3])
+                - q
+            )
+
+        # Check if q is within the CDF range
+        cdf_lower = objective(self.lower) + q
+        cdf_upper = objective(self.upper) + q
+
+        if cdf_lower > 0:
+            return self.lower
+        elif cdf_upper < 0:
+            return self.upper
+        else:
+            return brentq(objective, self.lower, self.upper)
+
 
 # Example usage with plotting
 if __name__ == "__main__":
     # Create expert input
     expert_input = ExpertInput(
-        median=3.25, q25=3.22, q75=3.28, q05=3.1, q95=3.55, confidence=0.5
+        median=3.25, q25=3.20, q75=3.3, q05=3.0, q95=3.35, confidence=0.5
     )
 
     # Fit model
@@ -666,7 +765,12 @@ if __name__ == "__main__":
     fig, ax = model.plot_pdf(
         show_quantiles=True,
         show_confidence=True,
-        title="Expert Opinion: Asset Price Distribution",
     )
+    plt.tight_layout()
+    plt.show()
+
+    modelmix = MixtureNormalExpertOpinion(expert_input)
+    modelmix.fit()
+    fig, ax = modelmix.plot_pdf()
     plt.tight_layout()
     plt.show()
