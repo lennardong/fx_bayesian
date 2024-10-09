@@ -215,7 +215,7 @@ https://claude.ai/chat/aee5df6a-d673-4c3f-8e2a-84c4d931d278
 
 import numpy as np
 from scipy import stats
-from scipy.optimize import minimize
+from scipy.optimize import minimize, curve_fit
 from dataclasses import dataclass
 import warnings
 import matplotlib.pyplot as plt
@@ -245,6 +245,10 @@ class ExpertInput:
             raise ValueError("Confidence must be between 0 and 1")
 
 
+def logistic_function(x, L, k, x0):
+    return L / (1 + np.exp(-k * (x - x0)))
+
+
 class ExpertOpinion:
     """
     Enhanced expert opinion model using quantile-based Beta distribution fitting
@@ -266,9 +270,10 @@ class ExpertOpinion:
             self.expert.q75,
             self.expert.q95 if self.expert.q95 is not None else self.expert.q75,
         ]
-        self.lower = min(all_quantiles)
-        self.upper = max(all_quantiles)
-        self.range = self.upper - self.lower
+        # self.lower = min(all_quantiles) - 0.05
+        # self.upper = max(all_quantiles) + 0.05
+        # self.range = self.upper - self.lower
+        self._calculate_bounds()
 
         # Normalize all quantiles
         self.norm_q25 = (self.expert.q25 - self.lower) / self.range
@@ -279,6 +284,53 @@ class ExpertOpinion:
             self.norm_q05 = (self.expert.q05 - self.lower) / self.range
         if self.expert.q95 is not None:
             self.norm_q95 = (self.expert.q95 - self.lower) / self.range
+
+    def _calculate_bounds(self):
+        # Left side (median to Q05)
+        x_left = np.array([0.5, 0.05])
+        y_left = np.array([self.expert.median, self.expert.q05])
+        slope_left, intercept_left = np.polyfit(x_left, y_left, 1)
+
+        # Right side (median to Q95)
+        x_right = np.array([0.5, 0.95])
+        y_right = np.array([self.expert.median, self.expert.q95])
+        slope_right, intercept_right = np.polyfit(x_right, y_right, 1)
+
+        # Calculate bounds
+        self.lower = slope_left * 0 + intercept_left
+        self.upper = slope_right * 1 + intercept_right
+        self.range = self.upper - self.lower
+
+    def _calculate_bounds_linear3(self):
+        # Left side (Q05 to median)
+        x_left = np.array([0.05, 0.25, 0.5])
+        y_left = np.array([self.expert.q05, self.expert.q25, self.expert.median])
+        slope_left, intercept_left = np.polyfit(x_left, y_left, 1)
+
+        # Right side (median to Q95)
+        x_right = np.array([0.5, 0.75, 0.95])
+        y_right = np.array([self.expert.median, self.expert.q75, self.expert.q95])
+        slope_right, intercept_right = np.polyfit(x_right, y_right, 1)
+
+        # Extrapolate to get lower and upper bounds
+        self.lower = slope_left * 0 + intercept_left
+        self.upper = slope_right * 1 + intercept_right
+        self.range = self.upper - self.lower
+
+    def _calculate_bounds_logreg(self):
+        x_left = [0.05, 0.25, 0.5]
+        y_left = [self.expert.q05, self.expert.q25, self.expert.median]
+        params_left, _ = curve_fit(logistic_function, x_left, y_left, p0=[1, 1, 0.25])
+
+        x_right = [0.5, 0.75, 0.95]
+        y_right = [self.expert.median, self.expert.q75, self.expert.q95]
+        params_right, _ = curve_fit(
+            logistic_function, x_right, y_right, p0=[1, 1, 0.75]
+        )
+
+        self.lower = logistic_function(0, *params_left)
+        self.right = logistic_function(1, *params_right)
+        self.range = self.upper - self.lower
 
     def _estimate_initial_params(self):
         """
@@ -327,35 +379,44 @@ class ExpertOpinion:
         # Basic quantile matching
         q25_err = (stats.beta.ppf(0.25, alpha, beta) - self.norm_q25) ** 2
         q75_err = (stats.beta.ppf(0.75, alpha, beta) - self.norm_q75) ** 2
-        median_err = (stats.beta.ppf(0.5, alpha, beta) - self.norm_median) ** 2
+        median_err = (stats.beta.ppf(0.5, alpha, beta) - self.norm_median) ** 4
 
         # Weight median more heavily based on confidence
-        median_weight = 1 + self.expert.confidence
+        confidence_weight = 1 + self.expert.confidence
 
         # Basic error
-        error = median_err * median_weight + q25_err + q75_err
+        error = median_err**confidence_weight + q25_err + q75_err
 
         # Add tail quantile matching if available
-        if hasattr(self, "norm_q05"):
-            q05_err = (stats.beta.ppf(0.05, alpha, beta) - self.norm_q05) ** 2
-            error += q05_err
+        q05_err = (
+            (stats.beta.ppf(0.05, alpha, beta) - self.norm_q05) ** 4
+            if self.norm_q05
+            else 0
+        )
+        error += q05_err**confidence_weight
 
-        if hasattr(self, "norm_q95"):
-            q95_err = (stats.beta.ppf(0.95, alpha, beta) - self.norm_q95) ** 2
-            error += q95_err
+        q95_err = (
+            (stats.beta.ppf(0.95, alpha, beta) - self.norm_q95) ** 4
+            if self.norm_q95
+            else 0
+        )
+        error += q95_err**confidence_weight
 
         # Add shape penalty to prevent "fat" curves
         mode = (alpha - 1) / (alpha + beta - 2) if alpha + beta > 2 else 0.5
         mode_penalty = ((mode - self.norm_median) ** 2) * self.expert.confidence
+        # mode_penalty = 0
 
         # Penalty for extreme parameters (prevents "fat" curves)
         param_penalty = 0.01 * (alpha**2 + beta**2) / (alpha + beta) ** 2
+        # param_penalty = 0
 
         return error + mode_penalty + param_penalty
 
     def fit(self):
         """
         Fit beta distribution to expert opinions with improved optimization
+        TODO - make sure fitting also takes into account IQR and median. The area under curve should be aroudn this and penalties when no.
         """
         # Get initial parameter estimates
         initial_params = self._estimate_initial_params()
@@ -534,11 +595,67 @@ class ExpertOpinion:
         return fig, ax
 
 
+from scipy.stats import norm
+from scipy.optimize import minimize
+
+
+class MixtureNormalExpertOpinion:
+    def __init__(self, expert_input: ExpertInput):
+        self.expert = expert_input
+        self.mixture_params = None
+        self._calculate_bounds()
+
+    def _objective_function(self, params):
+        mu1, sigma1, mu2, sigma2, w = params
+        mixture_cdf = lambda x: w * norm.cdf(x, mu1, sigma1) + (1 - w) * norm.cdf(
+            x, mu2, sigma2
+        )
+
+        errors = []
+        if hasattr(self.expert, "q05"):
+            errors.append((mixture_cdf(self.expert.q05) - 0.05) ** 2)
+        errors.append((mixture_cdf(self.expert.q25) - 0.25) ** 2)
+        errors.append((mixture_cdf(self.expert.median) - 0.5) ** 2)
+        errors.append((mixture_cdf(self.expert.q75) - 0.75) ** 2)
+        if hasattr(self.expert, "q95"):
+            errors.append((mixture_cdf(self.expert.q95) - 0.95) ** 2)
+
+        return sum(errors)
+
+    def fit(self):
+        initial_guess = [
+            self.expert.median,
+            (self.expert.q75 - self.expert.q25) / 2,
+            self.expert.median,
+            (self.expert.q75 - self.expert.q25),
+            0.5,
+        ]
+        bounds = [
+            (self.lower, self.upper),
+            (0, None),
+            (self.lower, self.upper),
+            (0, None),
+            (0, 1),
+        ]
+
+        result = minimize(
+            self._objective_function, initial_guess, bounds=bounds, method="L-BFGS-B"
+        )
+        self.mixture_params = result.x
+        return self
+
+    def pdf(self, x):
+        mu1, sigma1, mu2, sigma2, w = self.mixture_params
+        return w * norm.pdf(x, mu1, sigma1) + (1 - w) * norm.pdf(x, mu2, sigma2)
+
+    # Add methods for sampling, plotting, etc.
+
+
 # Example usage with plotting
 if __name__ == "__main__":
     # Create expert input
     expert_input = ExpertInput(
-        median=3.25, q25=3.22, q75=3.28, q05=3.1, q95=3.55, confidence=0.2
+        median=3.25, q25=3.22, q75=3.28, q05=3.1, q95=3.55, confidence=0.5
     )
 
     # Fit model
@@ -553,4 +670,3 @@ if __name__ == "__main__":
     )
     plt.tight_layout()
     plt.show()
-    print(model.sample())
