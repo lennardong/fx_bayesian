@@ -1,0 +1,262 @@
+# import os
+# os.environ['PYTENSOR_FLAGS'] = 'device=cuda,floatX=float32'
+
+import numpy as np
+import pymc as pm
+import arviz as az
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+import pytensor
+from typing import Tuple
+
+
+"""
+
+# P1 - build skew normal estimation model
+"""
+
+
+class ExpertOpinion:
+    """
+    Expert Opinion of FX exchange rates.
+    """
+
+    def __init__(self, median, q25, q75, q05, q95):
+        self.median = median
+        self.q25 = q25
+        self.q75 = q75
+        self.q05 = q05
+        self.q95 = q95
+
+
+def initialize_gamma_params(expert: ExpertOpinion) -> Tuple[float, float]:
+    mean = expert.median
+    variance = ((expert.q75 - expert.q25) / (2 * 0.67449)) ** 2
+    init_alpha = mean**2 / variance
+    init_beta = mean / variance
+    return init_alpha, init_beta
+
+
+def estimate_parameters_gamma_skewnorm(
+    expert: ExpertOpinion, *, samples: int = 2000, chains: int = 4
+) -> az.InferenceData:
+    init_alpha, init_beta = initialize_gamma_params(expert)
+
+    with pm.Model() as model:
+        mu = pm.Gamma("mu", alpha=init_alpha, beta=init_beta)
+        sigma = pm.Gamma("sigma", alpha=init_alpha, beta=init_beta)
+        alpha = pm.Normal("alpha", mu=0, sigma=2)
+
+        fx_distribution = pm.SkewNormal(
+            "fx_distribution", mu=mu, sigma=sigma, alpha=alpha
+        )
+
+        fx_samples = pm.draw(fx_distribution, draws=10_000)
+        q25_val, median_val, q75_val = np.percentile(fx_samples, [25, 50, 75])
+
+        likelihood = pm.Normal(
+            "likelihood",
+            mu=0,
+            sigma=0.01,
+            observed=[
+                expert.q25 - q25_val,
+                expert.median - median_val,
+                expert.q75 - q75_val,
+            ],
+        )
+
+        trace = pm.sample(
+            draws=samples,
+            tune=samples,
+            chains=chains,
+            target_accept=0.95,
+            return_inferencedata=True,
+        )
+
+    return trace
+
+
+def estimate_parameters_gamma_gamma(
+    expert: ExpertOpinion, *, samples: int = 2000, chains: int = 4
+) -> az.InferenceData:
+    # Estimate mean using the median
+    mean = expert.median
+
+    # Estimate variance using interquartile range
+    variance = ((expert.q75 - expert.q25) / (2 * 0.67449)) ** 2
+
+    # Calculate initial alpha and beta for the gamma distribution
+    init_alpha = (mean**2) / variance
+    init_beta = mean / variance
+
+    with pm.Model() as model:
+        alpha = pm.Gamma("alpha", alpha=init_alpha, beta=init_beta)
+        beta = pm.Gamma("beta", alpha=init_alpha, beta=init_beta)
+
+        fx_distribution = pm.Gamma("fx_distribution", alpha=alpha, beta=beta)
+
+        # Generate samples to compute the quantiles
+        fx_samples = pm.draw(fx_distribution, draws=10_000)
+        q25_val, median_val, q75_val = np.percentile(fx_samples, [25, 50, 75])
+
+        # Fit the model
+        likelihood = pm.Normal(
+            "likelihood",
+            mu=0,
+            sigma=0.01,
+            observed=[
+                expert.q25 - q25_val,
+                expert.median - median_val,
+                expert.q75 - q75_val,
+            ],
+        )
+
+        trace = pm.sample(
+            draws=samples,
+            tune=samples,
+            chains=chains,
+            target_accept=0.95,
+            return_inferencedata=True,
+        )
+
+    return trace
+
+
+def estimate_parameters_beta(
+    expert: ExpertOpinion, *, samples: int = 2000, chains: int = 4
+) -> az.InferenceData:
+    # Calculate mean and variance from expert opinion
+    mean = expert.median
+    variance = ((expert.q75 - expert.q25) / (2 * 0.67449)) ** 2
+
+    # Estimate initial alpha and beta for the Beta distribution
+    init_mean = (mean - expert.q05) / (expert.q95 - expert.q05)
+    init_var = variance / ((expert.q95 - expert.q05) ** 2)
+    init_alpha = ((1 - init_mean) / init_var - 1 / init_mean) * init_mean**2
+    init_beta = init_alpha * (1 / init_mean - 1)
+
+    with pm.Model() as model:
+        # Use HalfNormal for alpha and beta to ensure positive values
+        alpha = pm.HalfNormal("alpha", sigma=init_alpha)
+        beta = pm.HalfNormal("beta", sigma=init_beta)
+
+        # Define the scaled FX distribution
+        scaled_fx = pm.Beta("scaled_fx", alpha=alpha, beta=beta)
+
+        # Transform back to original FX scale
+        fx_distribution = pm.Deterministic(
+            "fx_distribution", scaled_fx * (expert.q95 - expert.q05) + expert.q05
+        )
+
+        # Generate samples to compute the quantiles
+        fx_samples = pm.draw(fx_distribution, draws=10_000)
+        q25_val, median_val, q75_val = np.percentile(fx_samples, [25, 50, 75])
+
+        # Fit the model using a Student's t distribution for robustness
+        likelihood = pm.StudentT(
+            "likelihood",
+            nu=3,
+            mu=0,
+            sigma=0.01,
+            observed=[
+                expert.q25 - q25_val,
+                expert.median - median_val,
+                expert.q75 - q75_val,
+            ],
+        )
+
+        trace = pm.sample(
+            draws=samples,
+            tune=samples,
+            chains=chains,
+            target_accept=0.95,
+            return_inferencedata=True,
+        )
+
+    return trace
+
+
+def estimate_parameters_normal_skewnorm(
+    expert: ExpertOpinion, *, samples: int = 2000, chains: int = 4
+) -> az.InferenceData:
+
+    # Parameter Initialization
+    init_mu = expert.median
+    init_sigma_scale = (expert.q75 - expert.q25) / 1.349
+    init_alpha = (expert.q75 - expert.median) / (expert.median - expert.q25)
+
+    with pm.Model() as model:  # why use context manager for pmmodel?
+
+        # Build hyper params for stocahstic vars
+        mu = pm.Normal("mu", mu=init_mu, sigma=0.5)
+        sigma = pm.HalfNormal("sigma", sigma=init_sigma_scale)
+        alpha = pm.Normal("alpha", mu=init_alpha, sigma=1)  # ? why cauchy over normal?
+
+        # Build model
+        fx_distribution = pm.SkewNormal(
+            "fx_distribution", mu=mu, sigma=sigma, alpha=alpha
+        )
+
+        # Generate samples to compute the quantiles
+        fx_samples = pm.draw(fx_distribution, draws=10_000)
+        q25_val, median_val, q75_val = np.percentile(fx_samples, [25, 50, 75])
+        # Fit the model
+        likelihood = pm.Normal(
+            "likelihood",
+            mu=0,
+            sigma=0.01,  # acceptable error
+            observed=[
+                expert.q25 - q25_val,
+                expert.q75 - q75_val,
+                expert.median - median_val,
+            ],
+        )
+        # Sample from the posterior
+        trace = pm.sample(
+            # model=model,
+            draws=samples,
+            tune=samples,
+            chains=chains,
+            target_accept=0.95,
+            return_inferencedata=True,
+        )
+
+    return trace
+
+
+def plot_az(trace: az.InferenceData):
+    """
+    Plots posterior distributions, credible intervals, and distribution traces using Arviz.
+
+    Parameters:
+    - trace (az.InferenceData): The posterior samples
+    """
+    # Plot posterior distributions for all parameters
+    az.plot_posterior(trace)
+    plt.show()
+
+
+def test_function(Model, median, q25, q75, q05, q95) -> az.InferenceData:
+    """
+    Test function to run the model estimation, plot the trace, and visualize distributions.
+    """
+    expert = ExpertOpinion(median, q25, q75, q05, q95)
+    trace = Model(expert)
+    # plot_trace(trace)
+    # plot_skewnormal(expert, trace)
+    plot_az(trace)
+    return trace
+
+
+if __name__ == "__main__":
+    # test_trace1 = test_function(estimate_parameters_beta, 3.28, 3.25, 3.29, 3.20, 3.35)
+    test_trace1 = test_function(
+        estimate_parameters_normal_skewnorm, 3.28, 3.25, 3.29, 3.20, 3.35
+    )
+    # test_trace2 = test_function(
+    #     estimate_parameters_gamma_skewnorm, 3.28, 3.25, 3.29, 3.20, 3.35
+    # )
+    # test_trace3 = test_function(
+    #     estimate_parameters_gamma_gamma, 3.28, 3.25, 3.29, 3.20, 3.35
+    # )

@@ -1,225 +1,12 @@
-"""
-# Quantile-Based Expert Opinion Modeling
-
-## Overview
-The goal is to transform expert opinions about future values (like FX rates, stock prices, or any financial metric) into a proper probability distribution. Instead of asking experts for complex statistical parameters, we ask them for intuitive quantile estimates - essentially, their views on different scenarios and their likelihood.
-
-## Core Approach
-Our method uses five key pieces of information from experts:
-- Median (50th percentile): Their "best guess" of the future value
-- 25th and 75th percentiles: Values they think have a 1-in-4 chance of occurring
-- 5th and 95th percentiles (optional): Their views on "extreme but plausible" scenarios
-- Confidence level: How sure they are about their estimates
-
-We then fit this information to a Beta distribution, which is particularly good at modeling bounded random variables and can capture various shapes (symmetric, skewed, peaked, or flat).
-
-## Why This Works
-1. **Intuitive Input**: Experts are more comfortable and accurate when thinking in terms of scenarios ("I'm 95% sure it won't go above X") rather than statistical parameters like standard deviations or skewness.
-
-2. **Mathematical Rigor**: While the inputs are intuitive, the underlying mathematics is robust:
-   - Beta distributions can represent a wide range of shapes
-   - The fitting process ensures the distribution respects all the expert's views
-   - The resulting distribution is smooth and well-behaved, suitable for further mathematical operations
-
-3. **Confidence Integration**: The expert's confidence level helps control how "peaked" or "spread out" the final distribution is, reflecting their uncertainty.
-
-## Applications
-The resulting distributions can be used for:
-- Risk assessment and scenario analysis
-- Option pricing and derivatives modeling
-- Portfolio optimization
-- Trading strategy development
-- Consensus building when multiple experts are involved
-
-## Advantages Over Other Approaches
-Unlike previous methods that used triangular distributions or kernel density estimation (KDE), our quantile-based approach:
-- Is more intuitive for experts to provide inputs
-- Directly captures tail risks (through 5th and 95th percentiles)
-- Produces a parametric distribution that's easy to work with mathematically
-- Avoids the smoothing and bandwidth selection issues associated with KDE
-- Results in more stable and reliable distributions
-
-## Technical Implementation
-We use numerical optimization to find Beta distribution parameters that best match the expert's quantile estimates. The optimization includes:
-- Smart initialization based on the provided quantiles
-- Multiple optimization methods to ensure robust fitting
-- Penalties to prevent unrealistic distribution shapes
-- Built-in validation of expert inputs for consistency
-
-## Practical Usage
-The model provides various ways to work with the fitted distribution:
-- Generate random samples for simulation
-- Calculate probabilities for any range of values
-- Visualize the distribution and compare it with expert inputs
-- Combine opinions from multiple experts
-
-This approach bridges the gap between expert knowledge and quantitative modeling, providing a rigorous yet practical way to incorporate subjective views into financial analysis.
-"""
-
-'''
-# Understanding Confidence in Expert Opinion Models
-
-## Intuitive Understanding
-
-Think of confidence as "how sure are you about your estimates?" It affects the shape of our probability distribution in two key ways:
-
-1. **Peak Sharpness**: 
-   - High confidence → Sharper, more concentrated distribution
-   - Low confidence → Flatter, more spread-out distribution
-
-2. **Tail Behavior**:
-   - High confidence → Thinner tails (extreme outcomes less likely)
-   - Low confidence → Fatter tails (extreme outcomes more likely)
-
-### Real-World Example
-
-Imagine two FX traders providing forecasts for EUR/USD in one month:
-
-**Trader A (High Confidence, 0.9)**
-- Current rate: 1.10
-- "I'm very confident the rate will be between 1.08 and 1.12"
-- Median: 1.10
-- Q25-Q75: 1.09-1.11
-- Q05-Q95: 1.08-1.12
-
-**Trader B (Low Confidence, 0.5)**
-- Current rate: 1.10
-- "There's a lot of uncertainty right now..."
-- Median: 1.10
-- Q25-Q75: 1.07-1.13
-- Q05-Q95: 1.05-1.15
-
-Even with the same median, their different confidence levels result in very different distributions.
-
-## Mathematical Implementation
-
-Our implementation translates confidence into mathematical constraints in several ways:
-
-### 1. Parameter Bounds Control
-
-```python
-def _get_parameter_bounds(self):
-    """Adjust parameter bounds based on confidence"""
-    # Higher confidence = tighter bounds on parameters
-    max_param = 100 * (2 - self.expert.confidence)
-    return ((0.1, max_param), (0.1, max_param))
-```
-
-For example:
-- Confidence = 0.9 → max_param = 110 (tight bounds)
-- Confidence = 0.5 → max_param = 150 (looser bounds)
-
-### 2. Objective Function Weighting
-
-```python
-def _quantile_objective(self, params):
-    alpha, beta = params
-    
-    # Basic errors
-    q25_err = (stats.beta.ppf(0.25, alpha, beta) - self.norm_q25) ** 2
-    q75_err = (stats.beta.ppf(0.75, alpha, beta) - self.norm_q75) ** 2
-    median_err = (stats.beta.ppf(0.5, alpha, beta) - self.norm_median) ** 2
-    
-    # Weight median more heavily based on confidence
-    median_weight = 1 + self.expert.confidence
-    
-    # Confidence affects shape penalty
-    shape_penalty = ((alpha + beta) * (1 - self.expert.confidence))
-    
-    return (median_err * median_weight + 
-            q25_err + q75_err + 
-            shape_penalty)
-```
-
-### 3. Initial Parameter Estimation
-
-```python
-def _estimate_initial_params(self):
-    # Use IQR to estimate spread
-    iqr = self.norm_q75 - self.norm_q25
-    
-    # Estimate variance using IQR and confidence
-    # Lower confidence = higher variance
-    variance = (iqr / 1.35) ** 2 * (2 - self.expert.confidence)
-    
-    # Method of moments adjusted by confidence
-    mean = self.norm_median
-    mean_term = mean * (1 - mean) / variance - 1
-    
-    alpha = mean * mean_term
-    beta = (1 - mean) * mean_term
-    
-    return max(0.1, alpha), max(0.1, beta)
-```
-
-## Visual Demonstration
-
-Let's add a method to visualize how confidence affects the distribution:
-
-```python
-def plot_confidence_comparison(self, confidences=[0.3, 0.6, 0.9], figsize=(12, 6)):
-    """Compare distributions with different confidence levels"""
-    fig, ax = plt.subplots(figsize=figsize)
-    
-    for conf in confidences:
-        # Create temporary model with this confidence
-        temp_expert = ExpertInput(
-            median=self.expert.median,
-            q25=self.expert.q25,
-            q75=self.expert.q75,
-            q05=self.expert.q05,
-            q95=self.expert.q95,
-            confidence=conf
-        )
-        temp_model = ExpertOpinion(temp_expert)
-        temp_model.fit()
-        
-        # Plot PDF
-        x = np.linspace(self.lower, self.upper, 1000)
-        y = temp_model.pdf(x)
-        ax.plot(x, y, label=f'Confidence = {conf:.1f}')
-    
-    ax.set_title('Impact of Confidence on Distribution Shape')
-    ax.set_xlabel('Value')
-    ax.set_ylabel('Density')
-    ax.legend()
-    return fig, ax
-```
-
-## Mathematical Effects
-
-Confidence affects our Beta distribution in three key ways:
-
-1. **Parameter Magnitude**:
-   - Higher confidence → Larger α and β parameters
-   - This creates a more peaked distribution
-   
-2. **Parameter Ratio**:
-   - Confidence affects how closely we stick to the expert's median
-   - Higher confidence puts more weight on hitting the exact median
-
-3. **Optimization Constraints**:
-   - Higher confidence tightens the allowable parameter space
-   - This prevents the optimization from finding solutions that are too spread out
-
-## Practical Impact
-
-The confidence parameter helps us:
-1. Distinguish between strong and weak opinions
-2. Properly weight different expert opinions when combining them
-3. Adjust risk measures based on certainty levels
-4. Create more realistic scenario analyses
-
-https://claude.ai/chat/aee5df6a-d673-4c3f-8e2a-84c4d931d278
-'''
-
 import numpy as np
 from scipy import stats
 from scipy.optimize import minimize, curve_fit, brentq
 from dataclasses import dataclass
 import warnings
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+import pandas as pd
+
+import seaborn as sns
 
 
 @dataclass
@@ -270,10 +57,10 @@ class ExpertOpinion:
             self.expert.q75,
             self.expert.q95 if self.expert.q95 is not None else self.expert.q75,
         ]
-        # self.lower = min(all_quantiles) - 0.1
-        # self.upper = max(all_quantiles) + 0.1
-        # self.range = self.upper - self.lower
-        self._calculate_bounds()
+        self.lower = min(all_quantiles) - 0.1
+        self.upper = max(all_quantiles) + 0.1
+        self.range = self.upper - self.lower
+        # self._calculate_bounds()
 
         # Normalize all quantiles
         self.norm_q25 = (self.expert.q25 - self.lower) / self.range
@@ -286,6 +73,9 @@ class ExpertOpinion:
             self.norm_q95 = (self.expert.q95 - self.lower) / self.range
 
     def _calculate_bounds(self):
+        """
+        This doesn't work well
+        """
         # Left side (median to Q05)
         x_left = np.array([0.5, 0.05])
         y_left = np.array([self.expert.median, self.expert.q05])
@@ -579,177 +369,6 @@ class ExpertOpinion:
         return fig, ax
 
 
-from scipy.stats import norm
-from scipy.optimize import minimize
-
-
-class MixtureNormalExpertOpinion:
-    def __init__(self, expert_input: ExpertInput):
-        self.expert = expert_input
-        self.mixture_params = None
-        self._calculate_bounds()
-
-    def _calculate_bounds(self):
-        # Left side (median to Q05)
-        x_left = np.array([0.5, 0.05])
-        y_left = np.array([self.expert.median, self.expert.q05])
-        slope_left, intercept_left = np.polyfit(x_left, y_left, 1)
-
-        # Right side (median to Q95)
-        x_right = np.array([0.5, 0.95])
-        y_right = np.array([self.expert.median, self.expert.q95])
-        slope_right, intercept_right = np.polyfit(x_right, y_right, 1)
-
-        # Calculate bounds
-        self.lower = slope_left * 0 + intercept_left
-        self.upper = slope_right * 1 + intercept_right
-        self.range = self.upper - self.lower
-
-    def _objective_function(self, params):
-        mu1, sigma1, mu2, sigma2, w = params
-        mixture_cdf = lambda x: w * norm.cdf(x, mu1, sigma1) + (1 - w) * norm.cdf(
-            x, mu2, sigma2
-        )
-
-        errors = []
-        if hasattr(self.expert, "q05"):
-            errors.append((mixture_cdf(self.expert.q05) - 0.05) ** 2)
-        errors.append((mixture_cdf(self.expert.q25) - 0.25) ** 2)
-        errors.append((mixture_cdf(self.expert.median) - 0.5) ** 2)
-        errors.append((mixture_cdf(self.expert.q75) - 0.75) ** 2)
-        if hasattr(self.expert, "q95"):
-            errors.append((mixture_cdf(self.expert.q95) - 0.95) ** 2)
-
-        return sum(errors)
-
-    def fit(self):
-        initial_guess = [
-            self.expert.median,
-            (self.expert.q75 - self.expert.q25) / 2,
-            self.expert.median,
-            (self.expert.q75 - self.expert.q25),
-            0.5,
-        ]
-        bounds = [
-            (self.lower, self.upper),
-            (0, None),
-            (self.lower, self.upper),
-            (0, None),
-            (0, 1),
-        ]
-
-        result = minimize(
-            self._objective_function, initial_guess, bounds=bounds, method="L-BFGS-B"
-        )
-        self.mixture_params = result.x
-        return self
-
-    def pdf(self, x):
-        mu1, sigma1, mu2, sigma2, w = self.mixture_params
-        return w * norm.pdf(x, mu1, sigma1) + (1 - w) * norm.pdf(x, mu2, sigma2)
-
-    # Add methods for sampling, plotting, etc.
-
-    def plot_pdf(
-        self, num_points=1000, figsize=(12, 8), show_quantiles=True, title=None
-    ):
-        if self.mixture_params is None:
-            raise ValueError("Model must be fitted first")
-
-        fig, ax = plt.subplots(figsize=figsize)
-
-        # Generate points for PDF curve
-        x = np.linspace(self.lower, self.upper, num_points)
-        y = self.pdf(x)
-
-        # Plot main PDF
-        ax.plot(x, y, "b-", lw=2, label="Fitted Mixture Distribution")
-
-        if show_quantiles:
-            # Plot expert quantile markers
-            quantiles = [
-                (0.05, self.expert.q05, "Q05"),
-                (0.25, self.expert.q25, "Q25"),
-                (0.5, self.expert.median, "Median"),
-                (0.75, self.expert.q75, "Q75"),
-                (0.95, self.expert.q95, "Q95"),
-            ]
-
-            # Plot vertical lines for expert quantiles
-            for q, val, label in quantiles:
-                y_height = self.pdf(val)
-                ax.vlines(val, 0, y_height, colors="r", linestyles="--", alpha=0.5)
-                ax.plot(val, y_height, "ro")
-                ax.annotate(
-                    f"{label}\n({val:.2f})",
-                    xy=(val, y_height),
-                    xytext=(0, 10),
-                    textcoords="offset points",
-                    ha="center",
-                    va="bottom",
-                )
-
-            # Plot distribution-derived quantiles
-            mixture_cdf = lambda x: self.mixture_params[4] * norm.cdf(
-                x, self.mixture_params[0], self.mixture_params[1]
-            ) + (1 - self.mixture_params[4]) * norm.cdf(
-                x, self.mixture_params[2], self.mixture_params[3]
-            )
-            dist_quantiles = [self.quantile(q) for q, _, _ in quantiles]
-            for q, val in zip([q for q, _, _ in quantiles], dist_quantiles):
-                y_height = self.pdf(val)
-                ax.vlines(val, 0, y_height, colors="orange", linestyles=":", alpha=0.7)
-                ax.plot(val, y_height, "o", color="orange")
-                ax.annotate(
-                    f"Dist {q:.2f}\n({val:.2f})",
-                    xy=(val, y_height),
-                    xytext=(0, 10),
-                    textcoords="offset points",
-                    ha="center",
-                    va="bottom",
-                    color="orange",
-                )
-
-        # Customize plot
-        if title is None:
-            title = "Expert Opinion: Mixture of Normals Distribution"
-        ax.set_title(title)
-        ax.set_xlabel("Value")
-        ax.set_ylabel("Density")
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-
-        # Add a bit of padding to the x-axis
-        x_padding = (self.upper - self.lower) * 0.05
-        ax.set_xlim(self.lower - x_padding, self.upper + x_padding)
-
-        # Ensure y-axis starts at 0
-        ax.set_ylim(bottom=0)
-
-        return fig, ax
-
-    def quantile(self, q):
-        def objective(x):
-            return (
-                self.mixture_params[4]
-                * norm.cdf(x, self.mixture_params[0], self.mixture_params[1])
-                + (1 - self.mixture_params[4])
-                * norm.cdf(x, self.mixture_params[2], self.mixture_params[3])
-                - q
-            )
-
-        # Check if q is within the CDF range
-        cdf_lower = objective(self.lower) + q
-        cdf_upper = objective(self.upper) + q
-
-        if cdf_lower > 0:
-            return self.lower
-        elif cdf_upper < 0:
-            return self.upper
-        else:
-            return brentq(objective, self.lower, self.upper)
-
-
 # Example usage with plotting
 if __name__ == "__main__":
     # Create expert input
@@ -757,6 +376,9 @@ if __name__ == "__main__":
         median=3.25, q25=3.20, q75=3.3, q05=3.0, q95=3.35, confidence=0.5
     )
 
+    # expert_input = ExpertInput(
+    #     median=3.25, q25=3.20, q75=3.33, q05=3.10, q95=3.35, confidence=0.5
+    # )
     # Fit model
     model = ExpertOpinion(expert_input)
     model.fit()
@@ -769,8 +391,68 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.show()
 
-    modelmix = MixtureNormalExpertOpinion(expert_input)
-    modelmix.fit()
-    fig, ax = modelmix.plot_pdf()
+    banker = {
+        "q05": 3.10,
+        "q25": 3.20,
+        "median": 3.25,
+        "q75": 3.33,
+        "q95": 3.35,
+        "confidence": 0.50,
+    }
+    youtuber = {
+        "q05": 2.90,
+        "q25": 3.10,
+        "median": 3.20,
+        "q75": 3.28,
+        "q95": 3.30,
+        "confidence": 0.25,
+    }
+    fx_trader = {
+        "q05": 3.20,
+        "q25": 3.25,
+        "median": 3.28,
+        "q75": 3.35,
+        "q95": 3.40,
+        "confidence": 0.75,
+    }
+
+    experts = [banker, youtuber, fx_trader]
+    dfs = []
+
+    for expert in experts:
+        e_input = ExpertInput(**expert)
+        e_model = ExpertOpinion(e_input)
+        e_model.fit()
+        # Create and show plot
+        fig, ax = e_model.plot_pdf(
+            show_quantiles=True,
+            show_confidence=True,
+        )
+        plt.tight_layout()
+        plt.show()
+
+        # generate samples
+        df = pd.DataFrame(e_model.sample(10_000), columns=["fx_rate"])
+        dfs.append(df)
+        # ? how to merge to dfs?
+
+    dfs = pd.concat(dfs, axis=0)
+    dfs_summary = dfs.describe()
+    print(dfs_summary)
+
+    # Plot
+    sns.set_style("darkgrid")
+    plt.figure(figsize=(12, 6))
+    sns.histplot(
+        dfs["fx_rate"],
+        bins=30,
+        kde=True,
+        alpha=0.75,
+        edgecolor="white",
+        line_kws={"color": "green", "lw": 2},
+    )
+    plt.xlabel("FX Rate")
+    plt.ylabel("Count")
+    plt.title("Aggregate of Expert Opinions", fontsize=16)
     plt.tight_layout()
     plt.show()
