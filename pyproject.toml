@@ -7,20 +7,23 @@ readme = "README.md"
 packages = [{ include = "src" }]
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = "^3.12"
 pandas-datareader = "^0.10.0"
 duckdb = "^1.1.0"
 aiohttp = "^3.10.5"
 scipy = "^1.14.1"
 seaborn = "^0.13.2"
 pandas = "^2.2.2"
-numpy = "^2.1.1"
 pytest = "^8.3.3"
 mplfinance = "^0.12.10b0"
 plotly = "^5.24.1"
 ipykernel = "^6.29.5"
 nbformat = "^5.10.4"
 scikit-learn = "^1.5.2"
+numpy = ">=1.21.0,<2.0.0"
+pytensor = {version = "^2.25.5", python = ">=3.12,<3.13"}
+pymc = ">=5.0.0,<6.0.0"
+ipywidgets = "^8.1.5"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.11.2"
