@@ -76,65 +76,6 @@ def estimate_parameters(
     return trace
 
 
-def plot_trace(trace: az.InferenceData):
-    """
-    Plots the posterior distribution traces for model parameters.
-
-    Parameters:
-    - trace (az.InferenceData): The posterior samples
-    """
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-    # Extract posterior samples from the trace
-    mu_samples = trace.posterior["mu"].values.flatten()
-    sigma_samples = trace.posterior["sigma"].values.flatten()
-    alpha_samples = trace.posterior["alpha"].values.flatten()
-
-    # Plot the trace of each parameter (mu, sigma, alpha)
-    sns.histplot(mu_samples, kde=True, ax=axes[0], color="blue")
-    axes[0].set_title("Posterior distribution of mu")
-
-    sns.histplot(sigma_samples, kde=True, ax=axes[1], color="green")
-    axes[1].set_title("Posterior distribution of sigma")
-
-    sns.histplot(alpha_samples, kde=True, ax=axes[2], color="red")
-    axes[2].set_title("Posterior distribution of alpha")
-
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_skewnormal(expert: ExpertOpinion, trace: az.InferenceData):
-    """
-    Plots the resulting skew-normal distribution based on posterior parameters.
-    Either plots the mode (most probable distribution) or overlays several sampled distributions.
-
-    Parameters:
-    - expert (ExpertOpinion): The expert opinion object for reference
-    - trace (az.InferenceData): Posterior samples to use for plotting
-    """
-    mu_samples = trace.posterior["mu"].values.flatten()
-    sigma_samples = trace.posterior["sigma"].values.flatten()
-    alpha_samples = trace.posterior["alpha"].values.flatten()
-
-    x_values = np.linspace(expert.q05 - 0.1, expert.q95 + 0.1, 1000)
-
-    plt.figure(figsize=(10, 6))
-    for i in range(100):  # Plot a few sampled distributions to show variability
-        idx = np.random.randint(0, len(mu_samples))
-        distribution = pm.SkewNormal.dist(
-            mu=mu_samples[idx], sigma=sigma_samples[idx], alpha=alpha_samples[idx]
-        )
-        y_values = pm.draw(distribution, draws=len(x_values))
-        sns.kdeplot(y_values, alpha=0.1, color="blue")
-
-    plt.title("SkewNormal Distribution Samples from Posterior")
-    plt.xlabel("FX Rate")
-    plt.ylabel("Density")
-    plt.xlim(expert.q05 - 0.1, expert.q95 + 0.1)
-    plt.show()
-
-
 def plot_az(trace: az.InferenceData):
     """
     Plots posterior distributions, credible intervals, and skew normal traces using Arviz.
